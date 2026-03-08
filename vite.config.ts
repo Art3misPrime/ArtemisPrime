@@ -6,5 +6,5 @@ import react from '@vitejs/plugin-react'
 // For a custom domain or root deployment, set base: '/'
 export default defineConfig({
   plugins: [react()],
-  base: '/Art3misPrime/',
+  base: '/',
 })
