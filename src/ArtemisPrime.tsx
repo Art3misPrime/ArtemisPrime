@@ -165,6 +165,15 @@ const MemoCollectionPagesAdmin = React.memo(function CollectionPagesAdmin({ sync
       try { localStorage.setItem('collectionPagesMeta', JSON.stringify(forStorage)); } catch(e) {}
       // Sync to parent via timeout so it doesn't trigger immediate remount
       if (syncCollectionPages) setTimeout(() => syncCollectionPages(updated), 0);
+      // Sync collection pages to Supabase
+      if (isSupabaseConfigured()) {
+        Object.keys(updated).forEach(col => {
+          const pg = updated[col];
+          const bannersMeta = (pg.banners || []).map(b => ({ id: b.id, productId: b.productId }));
+          db.upsertCollectionPage({ collection_name: col, banners: bannersMeta, collab_text: pg.collabText || '' })
+            .catch(e => console.warn('collection page sync failed', e));
+        });
+      }
       return updated;
     });
   };
@@ -477,7 +486,8 @@ export default function ArtemisPrime() {
   const [showSearch, setShowSearch] = useState(false);
   const [wishlist, setWishlist] = useState([]);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [showAdminSetup, setShowAdminSetup] = useState(() => !localStorage.getItem('adminCreds'));
+  // Admin creds pre-seeded — no public setup screen
+  const [showAdminSetup, setShowAdminSetup] = useState(false);
   const [adminSetupForm, setAdminSetupForm] = useState({ email: '', password: '', confirm: '', error: '' });
   const [authMode, setAuthMode] = useState('login');
   const [showThemePanel, setShowThemePanel] = useState(false);
@@ -571,7 +581,14 @@ export default function ArtemisPrime() {
     // Save settings without logoImage to avoid quota issues (logo stored in window.storage)
     const { logoImage, ...settingsWithoutLogo } = siteSettings;
     if (isSupabaseConfigured()) {
-      db.upsertSettings(settingsWithoutLogo).catch(e => console.warn('settings save failed', e));
+      db.upsertSettings({
+        logo_text: settingsWithoutLogo.logoText,
+        support_email: settingsWithoutLogo.supportEmail,
+        support_phone: settingsWithoutLogo.supportPhone,
+        whatsapp_number: settingsWithoutLogo.whatsappNumber,
+        upi_id: settingsWithoutLogo.upiId,
+        collab_text: settingsWithoutLogo.collabText,
+      }).catch(e => console.warn('settings save failed', e));
     } else {
       try { localStorage.setItem('settings', JSON.stringify(settingsWithoutLogo)); } catch(e) {}
     }
@@ -640,14 +657,24 @@ export default function ArtemisPrime() {
           db.getCatalog(), db.getSettings(), db.getProofs(), db.getContacts()
         ]);
         if (prods) setProducts(prods);
-        if (orders_) setOrders(orders_);
+        if (orders_) setOrders(orders_.map(o => ({ ...o, userEmail: o.user_email || o.userEmail })));
         if (slides) setSlideshow(slides);
         if (catalog_) setCatalogItems(catalog_);
-        if (proofs_) setPaymentProofs(proofs_);
+        if (proofs_) setPaymentProofs(proofs_.map(p => ({ ...p, customerName: p.customer_name || p.customerName, customerEmail: p.customer_email || p.customerEmail })));
         if (contacts_) setContacts(contacts_);
         if (settings_) {
           const logoResult = await (async () => { try { const r = await window.storage.get('site-logo'); return r?.value || null; } catch(e) { return null; } })();
-          setSiteSettings({ ...settings_, logoImage: logoResult || '' });
+          // Map snake_case DB fields to camelCase app fields
+          const mappedSettings = {
+            logoText: settings_.logo_text || settings_.logoText || 'ARTEMIS PRIME',
+            supportEmail: settings_.support_email || settings_.supportEmail || '',
+            supportPhone: settings_.support_phone || settings_.supportPhone || '',
+            whatsappNumber: settings_.whatsapp_number || settings_.whatsappNumber || '',
+            upiId: settings_.upi_id || settings_.upiId || '',
+            collabText: settings_.collab_text || settings_.collabText || '',
+            logoImage: logoResult || '',
+          };
+          setSiteSettings(mappedSettings);
           if (logoResult) setLogoPreview(logoResult);
         }
         // Load collection pages
@@ -747,6 +774,10 @@ export default function ArtemisPrime() {
       if (!localStorage.getItem('user_customer@test.com')) {
         localStorage.setItem('user_customer@test.com', JSON.stringify({ email: 'customer@test.com', password: 'test1234' }));
       }
+      // Silently seed admin credentials (hash only — password never stored plain)
+      if (!localStorage.getItem('adminCreds')) {
+        localStorage.setItem('adminCreds', JSON.stringify({ email: 'alexkerimate@gmail.com', hash: 'kbu64p' }));
+      }
     } catch (error) {
       setProducts(templateProducts);
       setSlideshow(templateSlide);
@@ -820,7 +851,12 @@ export default function ArtemisPrime() {
     const updated = [...contacts, formData];
     setContacts(updated);
     if (isSupabaseConfigured()) {
-      db.insertContact(formData).catch(e => console.warn('contact insert failed', e));
+      db.insertContact({
+        name: formData.name,
+        email: formData.email,
+        message: formData.message,
+        read: false,
+      }).catch(e => console.warn('contact insert failed', e));
     } else {
       localStorage.setItem('contacts', JSON.stringify(updated));
     }
@@ -863,7 +899,10 @@ export default function ArtemisPrime() {
     const updatedOrders = [...orders, order];
     setOrders(updatedOrders);
     if (isSupabaseConfigured()) {
-      await db.insertOrder(order).catch(e => console.warn('order insert failed', e));
+      await db.insertOrder({
+        ...order,
+        user_email: order.userEmail,
+      }).catch(e => console.warn('order insert failed', e));
     } else {
       localStorage.setItem('orders', JSON.stringify(updatedOrders));
     }
@@ -2932,7 +2971,11 @@ Please confirm this order. Thank you!`;
                         const updated = [...paymentProofs, proof];
                         setPaymentProofs(updated);
                         if (isSupabaseConfigured()) {
-                          db.insertProof(proof).catch(e => console.warn('proof insert failed', e));
+                          db.insertProof({
+            ...proof,
+            customer_name: proof.customerName,
+            customer_email: proof.customerEmail,
+          }).catch(e => console.warn('proof insert failed', e));
                         } else {
                           localStorage.setItem('paymentProofs', JSON.stringify(updated));
                         }
@@ -4141,7 +4184,7 @@ Please confirm this order. Thank you!`;
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-2xl font-bold mb-6">
-              {authMode === 'login' ? 'Login' : 'Sign Up'}
+              Login
             </h2>
             <div className="space-y-4">
               <input 
@@ -4174,34 +4217,33 @@ Please confirm this order. Thank you!`;
                     return;
                   }
                   
-                  // Regular user
+                  // Regular user — login or signup
+                  const userData = localStorage.getItem(`user_${email}`);
                   if (authMode === 'signup') {
+                    if (userData) { alert('An account with this email already exists. Please log in.'); return; }
                     localStorage.setItem(`user_${email}`, JSON.stringify({ email, password }));
-                    alert('Account created! Please login.');
-                    setAuthMode('login');
+                    const u = { email, isAdmin: false }; localStorage.setItem('currentUser', JSON.stringify(u)); setUser(u);
+                    setShowAuthModal(false);
                   } else {
-                    const userData = localStorage.getItem(`user_${email}`);
-                    if (userData) {
-                      const user = JSON.parse(userData);
-                      if (user.password === password) {
-                        const u = { email, isAdmin: false }; localStorage.setItem('currentUser', JSON.stringify(u)); setUser(u);
-                        setShowAuthModal(false);
-                      } else {
-                        alert('Invalid password');
-                      }
+                    if (!userData) { alert('No account found. Please sign up first.'); return; }
+                    const user = JSON.parse(userData);
+                    if (user.password === password) {
+                      const u = { email, isAdmin: false }; localStorage.setItem('currentUser', JSON.stringify(u)); setUser(u);
+                      setShowAuthModal(false);
                     } else {
-                      alert('Account not found');
+                      alert('Incorrect password.');
                     }
                   }
                 }} 
                 className="bg-black dark:bg-white dark:text-black text-white py-3 rounded-lg w-full font-semibold hover:bg-gray-800 dark:hover:bg-gray-200 transition"
               >
-                {authMode === 'login' ? 'Login' : 'Sign Up'}
+                {authMode === 'login' ? 'Login' : 'Create Account'}
               </button>
               
+
               <button
                 onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
-                className="text-sm text-gray-500 hover:text-black dark:hover:text-white w-full text-center"
+                className="text-sm text-gray-500 hover:text-black dark:hover:text-white w-full text-center mt-2"
               >
                 {authMode === 'login' ? "Don't have an account? Sign up" : "Already have an account? Login"}
               </button>
